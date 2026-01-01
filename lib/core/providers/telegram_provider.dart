@@ -53,13 +53,18 @@ class TelegramProvider extends ChangeNotifier {
 
   // --- GETTERS ---
   List<Chat> get chats => _chats;
-  // Use Repository as source of truth, mapped to legacy model
-  List<User> get contacts =>
-      _userRepository.contacts.map((u) => User.fromTdUser(u)).toList();
-  // Map Repository user to Legacy user on the fly or use cached _me
-  User? get me => _userRepository.currentUser != null
-      ? User.fromTdUser(_userRepository.currentUser!)
-      : _me;
+
+  // Repo-backed contacts
+  List<User> get contacts => _userRepository.contacts
+      .map((u) => User.fromTdLibJson(u.toMap()))
+      .toList();
+
+  // Repo-backed profile
+  User? get me {
+    final u = _userRepository.currentUser;
+    return u != null ? User.fromTdLibJson(u.toMap()) : null;
+  }
+
   String get myBio => _myBio;
 
   List<StickerSetInfo> get stickerSets => _stickerSets;
@@ -76,7 +81,8 @@ class TelegramProvider extends ChangeNotifier {
   String? get currentChatId => _currentOpenChatId;
   String? get errorMessage => _userRepository.error;
 
-  User? _me;
+  // User? _me; // Removed
+
   String _myBio = "Loading bio...";
   static final GlobalKey<NavigatorState> navigatorKey =
       GlobalKey<NavigatorState>();
@@ -113,7 +119,8 @@ class TelegramProvider extends ChangeNotifier {
 
   TelegramProvider() {
     // 1. Initialize & Bind UserRepository
-    _userRepository.initialize();
+    // _userRepository.initialize(); // Removed
+
     _userRepository.addListener(() {
       notifyListeners();
     });
@@ -160,7 +167,7 @@ class TelegramProvider extends ChangeNotifier {
     debugPrint("🔄 [Provider] Manual session refresh requested.");
     _telegramService.send({'@type': 'getAuthorizationState'});
     // Also trigger user load if we think we are ready but data is missing
-    if (_initState == InitializationState.ready && _me == null) {
+    if (_initState == InitializationState.ready && me == null) {
       _onAuthReady();
     }
   }
@@ -851,21 +858,23 @@ class TelegramProvider extends ChangeNotifier {
         break;
 
       case 'updateOption':
+        // Delegate my_id logic to Repo
         if (event['name'] == 'my_id') {
-          _myUserId = event['value']['value'];
-          debugPrint("✅ [TRACE] Got my_id: $_myUserId");
-
-          // Immediately request user info
-          debugPrint("🚀 [TRACE] Requesting getUser for $_myUserId");
-          _telegramService.send({'@type': 'getUser', 'user_id': _myUserId});
-          _telegramService
-              .send({'@type': 'getUserFullInfo', 'user_id': _myUserId});
+          _userRepository.handleEvent(event);
+          // Keep local _myUserId for internal checks
+          if (event['value'] is int) {
+            _myUserId = event['value'];
+          } else if (event['value'] is Map && event['value']['value'] is int) {
+            _myUserId = event['value']['value'];
+          }
         }
         break;
 
       case 'user':
       case 'updateUser':
-        _handleUserUpdate(event);
+      case 'updateUserStatus':
+        // Delegate to Repository
+        _userRepository.handleEvent(event);
         break;
 
       case 'userFullInfo':
@@ -976,7 +985,8 @@ class TelegramProvider extends ChangeNotifier {
     debugPrint("🔐 Auth State: $state");
 
     if (state == 'authorizationStateClosed') {
-      _me = null;
+      // _me = null; // Removed
+
       _chats.clear();
       _messages.clear();
       _userMap.clear();
@@ -986,35 +996,6 @@ class TelegramProvider extends ChangeNotifier {
     } else if (state == 'authorizationStateReady') {
       _onAuthReady();
     }
-  }
-
-  void _handleUserUpdate(Map<String, dynamic> event) {
-    final userData = event['@type'] == 'user' ? event : event['user'];
-    final user = User.fromTdLibJson(userData);
-
-    // DEBUG: Print user info to trace if we are getting "me"
-    debugPrint(
-        "👤 [TRACE] User Object: ${user.name} (ID: ${user.id}) vs MyID: $_myUserId");
-    if (user.id == _myUserId.toString()) {
-      debugPrint("👤 [TRACE] MATCH! Updating ME: ${user.name}");
-    }
-
-    _userMap[user.id] = user;
-
-    if (user.id == _myUserId.toString()) {
-      _me = user;
-      debugPrint("✅ [TRACE] Profile loaded successfully: ${user.name}");
-      notifyListeners(); // Force notify!
-    }
-
-    // Auto-download profile photo if needed
-    if (userData['profile_photo'] != null &&
-        userData['profile_photo']['small']['local']['path'] == "") {
-      int fileId = userData['profile_photo']['small']['id'];
-      downloadFile(fileId);
-    }
-
-    _notifyOptimized();
   }
 
   void _handleMessageSendSucceeded(Map<String, dynamic> event) {
